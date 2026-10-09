@@ -58,7 +58,9 @@ class Tracking:
         "rl_insight",
     ]
 
-    def __init__(self, project_name, experiment_name, default_backend: str | list[str] = "console", config=None):
+    def __init__(
+        self, project_name, experiment_name, default_backend: str | list[str] = "console", config=None, session=None
+    ):
         if isinstance(default_backend, str):
             default_backend = [default_backend]
         for backend in default_backend:
@@ -185,7 +187,7 @@ class Tracking:
             self.logger["file"] = FileLogger(project_name, experiment_name)
 
         if "rl_insight" in default_backend:
-            self.logger["rl_insight"] = RLInsightLogger(project_name, experiment_name, config)
+            self.logger["rl_insight"] = RLInsightLogger(project_name, experiment_name, config, session=session)
 
     def log(self, data, step, backend=None):
         for default_backend, logger_instance in self.logger.items():
@@ -221,15 +223,39 @@ class Tracking:
 
 
 class RLInsightLogger:
-    """Logger backend that exports scalar metrics and rl-insight runtime signals."""
+    """Logger backend that exports scalar metrics and rl-insight runtime signals.
+
+    Two modes coexist. The legacy class-level facade keeps one implicit session
+    per process, resolved lazily from the environment. When an explicit
+    ``session`` is given, identity, transport and cleanup belong to that session:
+    the legacy facade is never started, and this logger never creates a second
+    run for the same training job (S3 §2.3, §4.1).
+    """
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
     _init_done = False
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
 
-    def __init__(self, project_name, experiment_name, config=None):
-        self.init(project_name=project_name, experiment_name=experiment_name, config=config)
+    def __init__(self, project_name, experiment_name, config=None, session=None):
+        self.session = session
+        if session is None:
+            self.init(project_name=project_name, experiment_name=experiment_name, config=config)
+        else:
+            # Instance-level dispatch: Tracking calls ``.log``/``.finish`` on the
+            # instance, and only the session path may touch SDK resources.
+            self.log = self._log_session
+            self.finish = self._finish_session
+
+    def _log_session(self, data, step):
+        """Export scalars through the explicit session (metric names unchanged)."""
+        integration = self._integration()
+        if integration is not None:
+            integration.log_scalars(self.session, data, step)
+
+    def _finish_session(self):
+        """No-op: the session's owner closes it, this logger only borrowed it."""
+        return
 
     @classmethod
     def _get_rl_insight(cls):
@@ -240,9 +266,174 @@ class RLInsightLogger:
         return cls._rl_insight_module
 
     @classmethod
+    def _integration(cls):
+        """The rl-insight integration glue, or None when it is not installed."""
+        try:
+            from rl_insight.integrations import verl as integration
+        except ImportError:
+            return None
+        return integration
+
+    @classmethod
     def enabled(cls) -> bool:
         """Return whether rl-insight is globally enabled in this process."""
         return os.getenv(cls.ENABLE_ENV) == "1"
+
+    # -- explicit-session entry points (S3 §3–§7) -----------------------------
+    @classmethod
+    def open_driver_session(cls, config, *, project_name=None, experiment_name=None):
+        """Create the run once in the driver; returns None without the SDK."""
+        integration = cls._integration()
+        if integration is None:
+            return None
+        return integration.open_driver_session(config, project_name=project_name, experiment_name=experiment_name)
+
+    @classmethod
+    def write_trainer_context(cls, config, driver) -> None:
+        """Store the driver's context in the config every trainer process sees."""
+        integration = cls._integration()
+        if integration is None or driver is None:
+            return
+        integration.write_trainer_context(config, driver.context_json)
+
+    @classmethod
+    def attach_trainer_session(cls, config):
+        """Join the driver's run in this process; never creates an identity."""
+        integration = cls._integration()
+        if integration is None:
+            return None
+        return integration.attach_from_config(config, component="trainer")
+
+    @classmethod
+    def serve_trainer_metrics(cls, session, *, address=None, instance_key="trainer/0"):
+        """Serve one session's registry, in the process that logs into it.
+
+        ``log_scalars`` writes into the session's registry, so the process that
+        logs them must also export them: the driver created the run but has a
+        registry of its own, and serving that one would export nothing. The
+        bound address is the published address — a node address no socket
+        listens on is a target the controlled scrape can only refuse (S3 §5.2).
+        A rejected publication is reported instead of being hidden.
+        """
+        integration = cls._integration()
+        if integration is None or session is None:
+            return None
+        if address is None:
+            import ray.util
+
+            address = ray.util.get_node_ip_address().strip("[]")
+        endpoint = integration.serve_trainer_metrics(
+            session,
+            host=address,
+            advertise_host=address,
+            instance_key=instance_key,
+        )
+        if endpoint is not None and not endpoint.publication.accepted:
+            logger.warning(
+                "[rl-insight] trainer metrics endpoint not published: %s %s",
+                endpoint.publication.code,
+                endpoint.publication.message,
+            )
+        return endpoint
+
+    @classmethod
+    def attach_rollout_session(cls, rollout_config):
+        """Join the run a rollout server actor's config declares."""
+        integration = cls._integration()
+        if integration is None:
+            return None
+        return integration.attach_rollout_session(rollout_config)
+
+    @classmethod
+    def write_rollout_context(cls, rollout_config, session, *, component) -> None:
+        """Declare the run context on the rollout config server actors receive."""
+        integration = cls._integration()
+        if integration is None or session is None or session.context is None:
+            return
+        integration.write_rollout_context(rollout_config, session.context.to_json(), component=component)
+
+    @classmethod
+    def write_worker_context(cls, worker_config, session, *, component) -> None:
+        """Declare the run context on the config the trainer workers receive."""
+        cls.write_rollout_context(worker_config, session, component=component)
+
+    @classmethod
+    def attach_worker_session(cls, worker_config):
+        """Join the run a trainer worker process's config declares."""
+        return cls.attach_rollout_session(worker_config)
+
+    @classmethod
+    @contextmanager
+    def session_trace_state(cls, state_name, *, session=None, state_lane_id=None, **labels):
+        """Report a state span on an explicit session.
+
+        ``session=None`` uses the single session this process attached, if any.
+        A process without one emits nothing: this hook never lazily creates an
+        identity of its own.
+        """
+        integration = cls._integration()
+        if integration is None:
+            yield
+            return
+        target = session if session is not None else integration.only_process_session()
+        with integration.trace_state(target, state_name, state_lane_id=state_lane_id, **labels):
+            yield
+
+    @classmethod
+    def install_metrics_identity(cls, app, session, *, incarnation, path="/metrics") -> bool:
+        """Stamp the session identity on the framework server's own /metrics."""
+        integration = cls._integration()
+        if integration is None or session is None:
+            return False
+        return integration.install_metrics_identity(app, session, incarnation=incarnation, path=path)
+
+    @classmethod
+    def publish_rollout_endpoint(cls, session, rollout_config, **facts):
+        """Publish one rollout engine's bound metrics endpoint (S3 §5.2).
+
+        The slot is scoped by the config node the manager serves, so several
+        rollout managers in one process never take over each other's endpoints.
+        """
+        integration = cls._integration()
+        if integration is None or session is None:
+            return None
+        component = f"{integration.read_rollout_component(rollout_config)}/{rollout_config.name}"
+        result = integration.publish_metrics_endpoint(session, component=component, **facts)
+        if not result.accepted:
+            logger.warning(
+                "[rl-insight] rollout endpoint %s not published: %s %s",
+                facts.get("instance_key"),
+                result.code,
+                result.message,
+            )
+        return result
+
+    @classmethod
+    def publish_transfer_queue_endpoint(cls, session, endpoint, probe=None):
+        """Publish the TransferQueue metrics endpoint the driver read.
+
+        ``probe`` re-reads the Controller's address and fails once the actor is
+        unreachable; it is what allows the lease to be renewed at all.
+        """
+        integration = cls._integration()
+        if integration is None:
+            return None
+        result = integration.publish_transfer_queue_endpoint(session, endpoint, probe=probe)
+        if not result.accepted:
+            logger.warning(
+                "[rl-insight] transfer queue endpoint not published: %s %s",
+                result.code,
+                result.message,
+            )
+        return result
+
+    @classmethod
+    def close_session(cls, session, deadline_seconds: float = 5.0):
+        """Close this process's own session within a bounded deadline."""
+        integration = cls._integration()
+        if integration is None or session is None:
+            return None
+        return integration.close(session, deadline_seconds=deadline_seconds)
 
     @classmethod
     def init(cls, project_name=None, experiment_name=None, config=None):

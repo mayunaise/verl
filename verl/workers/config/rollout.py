@@ -230,6 +230,13 @@ class RolloutConfig(BaseConfig):
     # Use Prometheus to collect and monitor rollout statistics
     prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
 
+    # Serialized RL-Insight session context and the config node it belongs to.
+    # The rollout server actors receive this config, so this is how every engine
+    # process joins the run its driver created (S3 §3 step 2, §5.2); both stay
+    # None when no explicit session drives the run.
+    observability_context: Optional[str] = None
+    observability_component: Optional[str] = None
+
     # Extension point for custom configurations
     custom: Optional[dict] = None
 

@@ -25,6 +25,7 @@ from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.logging_utils import configure_verl_logging
+from verl.utils.tracking import RLInsightLogger
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -91,7 +92,20 @@ def run_ppo(config, task_runner_class) -> None:
         runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = task_runner_class.remote()
-    ray.get(runner.run.remote(config))
+
+    # Create the run exactly once, in this driver process, and hand its
+    # serialized context to the TaskRunner through the config the runner already
+    # receives. No worker resolves a second identity (S3 §3, §4.1).
+    driver_session = RLInsightLogger.open_driver_session(
+        config,
+        project_name=config.trainer.project_name,
+        experiment_name=config.trainer.experiment_name,
+    )
+    RLInsightLogger.write_trainer_context(config, driver_session)
+    try:
+        ray.get(runner.run.remote(config))
+    finally:
+        RLInsightLogger.close_session(driver_session.session if driver_session is not None else None)
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None
     # This file is used for performance analysis
@@ -146,11 +160,35 @@ class TaskRunnerV1:
         OmegaConf.resolve(config)
         self.config = config
 
+        # Join the run the driver created; this process owns the trainer, the
+        # rollout server actors and the TransferQueue client (S3 §3 step 2).
+        session = RLInsightLogger.attach_trainer_session(config)
+        # The scalars this process logs land in *this* session's registry, and
+        # the driver has a different one, so the endpoint is served here: bound
+        # to the address it publishes, in the process that writes the samples
+        # (S3 §5.2).
+        RLInsightLogger.serve_trainer_metrics(session)
+
         # initialize transfer queue
         tq.init(config.transfer_queue)
+        # The Controller binds its metrics port at init time, so the address is
+        # known only now. It is published under this run's identity only when
+        # the Controller's own /metrics response carries that identity: the
+        # controlled scrape route verifies the headers on the response it
+        # ingests (S2 §4.2), and the stock TransferQueue exporter
+        # (transfer_queue/metrics.py, TQMetricsExporter.start) starts a plain
+        # prometheus_client server with no hook for them. Until the owning
+        # process stamps them, the endpoint stays not_ready and the driver logs
+        # why, instead of registering a target that can only ever be refused.
+        RLInsightLogger.publish_transfer_queue_endpoint(
+            session,
+            _transfer_queue_metrics_endpoint(config),
+            probe=lambda: _transfer_queue_metrics_probe(config),
+        )
         succeeded = False
         try:
             self.trainer = trainer_cls(config=config)
+            self.trainer.observability_session = session
             self.trainer.init()
             self.init_agent_loop_manager()
             self.trainer.fit(self.agent_loop_manager)
@@ -161,7 +199,41 @@ class TaskRunnerV1:
                 if tracking is not None:
                     tracking.finish(exit_code=0 if succeeded else 1)
             finally:
-                tq.close()
+                try:
+                    tq.close()
+                finally:
+                    RLInsightLogger.close_session(session)
+
+
+def _transfer_queue_metrics_endpoint(config) -> str | None:
+    """The endpoint the TransferQueue client reported after bind, if enabled.
+
+    A missing endpoint leaves the metrics channel not_ready and training
+    continues; it is never guessed from a configured port.
+    """
+    if not config.transfer_queue.get("metrics", {}).get("enabled", False):
+        return None
+    try:
+        import transfer_queue as tq
+
+        return tq.get_metrics_endpoint()
+    except Exception:
+        logger.exception("[rl-insight] transfer_queue metrics endpoint unavailable")
+        return None
+
+
+def _transfer_queue_metrics_probe(config) -> str | None:
+    """The Controller's current metrics address, or None when it cannot be confirmed.
+
+    Renewal is conditional on this check. Unlike the first read, an unreachable
+    Controller is not swallowed here: the caller stops renewing the lease, so a
+    dead Controller converges to no target by TTL.
+    """
+    if not config.transfer_queue.get("metrics", {}).get("enabled", False):
+        return None
+    import transfer_queue as tq
+
+    return tq.get_metrics_endpoint()
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)

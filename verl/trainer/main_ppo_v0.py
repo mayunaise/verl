@@ -25,6 +25,7 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import create_rl_dataset, create_rl_sampler, need_critic, need_reference_policy
 from verl.utils.config import validate_config
+from verl.utils.tracking import RLInsightLogger
 
 
 class BaseTaskRunner:
@@ -227,8 +228,20 @@ class TaskRunner(BaseTaskRunner):
             collate_fn=collate_fn,
             train_sampler=train_sampler,
         )
-        # Initialize the workers of the trainer.
-        trainer.init_workers()
+        # Join the run the driver created; this process owns the trainer, its
+        # workers and the rollout server actors (S3 §3 step 2).
+        session = RLInsightLogger.attach_trainer_session(config)
+        # The scalars this process logs land in *this* session's registry, and
+        # the driver has a different one, so the endpoint is served here: bound
+        # to the address it publishes, in the process that writes the samples
+        # (S3 §5.2).
+        RLInsightLogger.serve_trainer_metrics(session)
+        trainer.observability_session = session
+        try:
+            # Initialize the workers of the trainer.
+            trainer.init_workers()
 
-        # Start the training process.
-        trainer.fit()
+            # Start the training process.
+            trainer.fit()
+        finally:
+            RLInsightLogger.close_session(session)

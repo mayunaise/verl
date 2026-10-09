@@ -43,6 +43,33 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
+def _find_config_path(node: Any, target: Any, prefix: str = "") -> str:
+    """Dotted path of ``target`` inside a config tree, or "" when absent."""
+    if node is target:
+        return prefix
+    if not isinstance(node, DictConfig | dict):
+        return ""
+    for key in node.keys():
+        try:
+            child = node[key]
+        except Exception:
+            continue
+        path = _find_config_path(child, target, f"{prefix}.{key}" if prefix else str(key))
+        if path:
+            return path
+    return ""
+
+
+def _rollout_config_component(config: Any, rollout_config: Any) -> str:
+    """Name the config node this manager serves (actor / reward / teacher).
+
+    One process can host several rollout managers (e.g. hybrid plus standalone
+    replicas); the component keeps their registration slots distinct so one
+    manager never takes over another's endpoint.
+    """
+    return _find_config_path(config, rollout_config) or "rollout"
+
+
 class GlobalRequestLoadBalancer:
     """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
 
@@ -496,6 +523,8 @@ class LLMServerManager:
         self.rollout_resource_pool = rollout_resource_pool
         self.start_rank = start_rank
         self._load_balancer_cls = load_balancer_cls or GlobalRequestLoadBalancer
+        # The run this process joined, if the driver created one (S3 §3).
+        self.observation_session = None
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -553,6 +582,17 @@ class LLMServerManager:
         )
         num_replicas = world_size // rollout_world_size
 
+        # Hand this run's context to the rollout server actors through the
+        # config they already receive; each engine process joins the same run
+        # and publishes the endpoint it binds itself (S3 §3 step 2, §5.2).
+        self.observation_session = RLInsightLogger.attach_trainer_session(self.config)
+        if self.observation_session is not None:
+            RLInsightLogger.write_rollout_context(
+                self.rollout_config,
+                self.observation_session,
+                component=_rollout_config_component(self.config, self.rollout_config),
+            )
+
         self.rollout_replicas = [
             self.rollout_replica_class(
                 replica_rank=start_rank + replica_rank,
@@ -581,7 +621,9 @@ class LLMServerManager:
         print(f"LLMServerManager: {self.server_addresses}")
 
         # Update Prometheus / rl-insight metrics with server addresses
-        needs_metrics = self.rollout_config.prometheus.enable or RLInsightLogger.enabled()
+        needs_metrics = (
+            self.rollout_config.prometheus.enable or RLInsightLogger.enabled() or self.observation_session is not None
+        )
         if self.rollout_config.disable_log_stats:
             if needs_metrics:
                 raise ValueError("Metrics monitoring requires disable_log_stats=False, but it is currently True.")
@@ -590,7 +632,7 @@ class LLMServerManager:
                 update_prometheus_config(
                     self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name
                 )
-            if RLInsightLogger.enabled():
+            if RLInsightLogger.enabled() and self.observation_session is None:
                 RLInsightLogger.register_rollout_metrics(
                     self.server_addresses,
                     self.rollout_config.name,

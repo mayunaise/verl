@@ -219,7 +219,10 @@ class DistProfiler:
                 if profiler is None:
                     return func(self_instance, *args, **kwargs_inner)
 
-                with RLInsightLogger.trace_state(
+                # Report on this process's explicit session when it has one; a
+                # worker without a session emits nothing instead of lazily
+                # creating a second identity for the same job (S3 §2.3).
+                with RLInsightLogger.session_trace_state(
                     kwargs_outer.get("role", func.__qualname__), state_lane_id=f"rank_{profiler.rank}"
                 ):
                     if not profiler.check_enable() or not profiler.check_this_step() or not profiler.check_this_rank():

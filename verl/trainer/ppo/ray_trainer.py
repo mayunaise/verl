@@ -69,7 +69,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip.skip_manager import SkipManager
 from verl.utils.torch_functional import masked_mean
-from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.tracking import RLInsightLogger, ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
@@ -329,6 +329,9 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        # The explicit observation session the TaskRunner attached in this
+        # process; Tracking borrows it and never creates a second identity.
+        self.observability_session = None
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -779,6 +782,13 @@ class RayPPOTrainer:
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+
+        # Declare this run on the config the trainer workers receive, so each
+        # worker process joins it and its profiler spans carry the same identity
+        # (S3 §3 step 2).
+        RLInsightLogger.write_worker_context(
+            self.config.actor_rollout_ref, self.observability_session, component="actor_rollout_ref"
+        )
 
         # create actor and rollout
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
@@ -1396,6 +1406,7 @@ class RayPPOTrainer:
             experiment_name=self.config.trainer.experiment_name,
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
+            session=self.observability_session,
         )
 
         self.global_steps = 0

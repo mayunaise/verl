@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import secrets
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -171,6 +172,13 @@ class SGLangHttpServer:
         self.base_gpu_id = base_gpu_id
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+
+        # Join the run this rollout config declares, if the driver created one.
+        # Each engine process owns its own exporter instance: the incarnation
+        # changes only when this process restarts, and the published lease and
+        # the /metrics response headers carry the same one (S3 §2.3, §5.2).
+        self._observation_session = RLInsightLogger.attach_rollout_session(self.config)
+        self._observation_incarnation = uuid.uuid4().hex
 
         # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
         self._pd_decode_peers: list[ActorHandle] = []
@@ -340,7 +348,7 @@ class SGLangHttpServer:
             )
             args["dist_init_addr"] = dist_init_addr
 
-        if self.config.prometheus.enable or RLInsightLogger.enabled():
+        if self.config.prometheus.enable or RLInsightLogger.enabled() or self._observation_session is not None:
             if self.config.prometheus.served_model_name:
                 # Extract model name from path if it's a full path
                 served_model_name = self.config.prometheus.served_model_name
@@ -455,7 +463,25 @@ class SGLangHttpServer:
 
             add_prometheus_middleware(app)
 
+        # The engine owns this HTTP server: stamp the run identity on its own
+        # /metrics response so a controlled scrape verifies body and identity
+        # together (S3 §5.3).
+        RLInsightLogger.install_metrics_identity(
+            app, self._observation_session, incarnation=self._observation_incarnation
+        )
+
         self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
+        # Only the bound port is published, and only from the process that owns
+        # the exporter (S3 §5.2).
+        RLInsightLogger.publish_rollout_endpoint(
+            self._observation_session,
+            self.config,
+            instance_key=f"replica/{self.replica_rank}/node/{self.node_rank}",
+            advertised_host=self._server_address,
+            actual_port=self._server_port,
+            incarnation=self._observation_incarnation,
+            replica=self.replica_rank,
+        )
         self.tokenizer_manager.server_status = ServerStatus.Up
 
     async def wake_up(self):
@@ -631,7 +657,11 @@ class SGLangHttpServer:
         if self.lora_as_adapter:
             generate_request.lora_path = SGLANG_LORA_NAME
 
-        with RLInsightLogger.trace_state("sglang_generate", state_lane_id=f"replica_{self.replica_rank}"):
+        with RLInsightLogger.session_trace_state(
+            "sglang_generate",
+            session=self._observation_session,
+            state_lane_id=f"replica_{self.replica_rank}",
+        ):
             output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")

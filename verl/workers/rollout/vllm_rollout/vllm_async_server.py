@@ -164,6 +164,13 @@ class vLLMHttpServer:
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
 
+        # Join the run this rollout config declares, if the driver created one.
+        # Each engine process owns its own exporter instance: the incarnation
+        # changes only when this process restarts, and the published lease and
+        # the /metrics response headers carry the same one (S3 §2.3, §5.2).
+        self._observation_session = RLInsightLogger.attach_rollout_session(self.config)
+        self._observation_incarnation = uuid.uuid4().hex
+
         # used for controlling vllm server profiler
         profiler_config = self.config.profiler
         tool_config = None
@@ -483,7 +490,28 @@ class vLLMHttpServer:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
         self.engine = engine_client
+        # The engine owns this HTTP server: stamp the run identity on its own
+        # /metrics response so a controlled scrape verifies body and identity
+        # together (S3 §5.3).
+        RLInsightLogger.install_metrics_identity(
+            app, self._observation_session, incarnation=self._observation_incarnation
+        )
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
+        # Only the bound port is published, and only from the process that owns
+        # the exporter (S3 §5.2).
+        self._publish_observation_endpoint()
+
+    def _publish_observation_endpoint(self) -> None:
+        """Publish this replica's bound metrics endpoint under this run."""
+        RLInsightLogger.publish_rollout_endpoint(
+            self._observation_session,
+            self.config,
+            instance_key=f"replica/{self.replica_rank}/node/{self.node_rank}",
+            advertised_host=self._server_address,
+            actual_port=self._server_port,
+            incarnation=self._observation_incarnation,
+            replica=self.replica_rank,
+        )
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
@@ -612,7 +640,11 @@ class vLLMHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        with RLInsightLogger.trace_state("vllm_generate", state_lane_id=f"replica_{self.replica_rank}"):
+        with RLInsightLogger.session_trace_state(
+            "vllm_generate",
+            session=self._observation_session,
+            state_lane_id=f"replica_{self.replica_rank}",
+        ):
             generator = self.engine.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,

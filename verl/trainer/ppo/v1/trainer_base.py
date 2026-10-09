@@ -84,7 +84,12 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
-from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
+from verl.utils.tracking import (
+    DapoFilteredRewardTableLogger,
+    RLInsightLogger,
+    Tracking,
+    ValidationGenerationsLogger,
+)
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -138,6 +143,9 @@ class PPOTrainer(ABC):
         )
         # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
         self.local_trigger_step = 0
+        # The explicit observation session the TaskRunner attached in this
+        # process; Tracking borrows it and never creates a second identity.
+        self.observability_session = None
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -233,6 +241,13 @@ class PPOTrainer(ABC):
         self._init_resource_pool_mgr()
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+
+        # Declare this run on the config the trainer workers receive, so each
+        # worker process joins it and its profiler spans carry the same identity
+        # (S3 §3 step 2).
+        RLInsightLogger.write_worker_context(
+            self.config.actor_rollout_ref, self.observability_session, component="actor_rollout_ref"
+        )
 
         # 1. define actor and rollout class
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
@@ -400,6 +415,7 @@ class PPOTrainer(ABC):
             experiment_name=self.config.trainer.experiment_name,
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
+            session=self.observability_session,
         )
         self.validation_generations_logger = ValidationGenerationsLogger(
             project_name=self.config.trainer.project_name,

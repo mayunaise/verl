@@ -43,6 +43,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import (
     ActorConfig,
     DistillationConfig,
@@ -458,6 +459,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     ):
         Worker.__init__(self)
         self.config = config
+        # Join the run the trainer declared on this config, if there is one.
+        # The training workers this process creates (actor/ref) share it, so
+        # their profiler spans are reported under the same identity (S3 §3).
+        self.observability_session = RLInsightLogger.attach_worker_session(config)
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
