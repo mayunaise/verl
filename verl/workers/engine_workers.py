@@ -90,6 +90,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         set_numa_affinity()
 
         self.config = config
+        from verl.utils.tracking import RLInsightLogger
+
+        RLInsightLogger.bind_config(config)
         self.model_config = self.config.model_config
         self.engine_config = self.config.engine_config
         self.optimizer_config = self.config.optimizer_config
@@ -154,6 +157,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.flops_counter = None
 
         self.loss_fn = None
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def close_observation(self):
+        from verl.utils.tracking import RLInsightLogger
+
+        RLInsightLogger.finish()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
@@ -458,6 +467,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     ):
         Worker.__init__(self)
         self.config = config
+        from verl.utils.tracking import RLInsightLogger
+
+        RLInsightLogger.bind_config(config)
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
@@ -525,6 +537,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.set_loss_fn(loss_fn=loss_fn)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def close_observation(self):
+        from verl.utils.tracking import RLInsightLogger
+
+        RLInsightLogger.finish()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
         """Manual control of load/offload"""
         self.actor.to(device=device, model=model, optimizer=optimizer, grad=grad)
@@ -562,6 +580,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
+                rl_insight_context=self.config.get("rl_insight_context"),
                 model_type=ref_config.model_config.get("model_type", "language_model"),
                 model_config=ref_config.model_config,
                 engine_config=ref_config.engine,
@@ -599,6 +618,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             actor_training_config = TrainingWorkerConfig(
+                rl_insight_context=self.config.get("rl_insight_context"),
                 model_type=actor_config.model_config.get("model_type", "language_model"),
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,

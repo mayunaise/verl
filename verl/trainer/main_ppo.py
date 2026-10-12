@@ -53,51 +53,87 @@ def run_ppo(config, task_runner_class) -> None:
     if "rl_insight" in ([trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []):
         os.environ["VERL_RL_INSIGHT_ENABLE"] = "1"
 
-    # Check if Ray is not initialized
-    if not ray.is_initialized():
-        # Initialize Ray with a local cluster configuration
-        # Set environment variables in the runtime environment to control tokenizer parallelism,
-        # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
-        # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
-        default_runtime_env = get_ppo_ray_runtime_env(config)
-        ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
-        runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
-
-        if config.transfer_queue.enable:
-            # Add runtime environment variables for transfer queue
-            runtime_env_vars = runtime_env_kwargs.get("env_vars", {})
-            runtime_env_vars["TRANSFER_QUEUE_ENABLE"] = "1"
-            runtime_env_kwargs["env_vars"] = runtime_env_vars
-
-        runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
-        ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
-
-    # Create a remote instance of the TaskRunner class, and
-    # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
-    if (
-        is_cuda_available
-        and config.global_profiler.tool == "nsys"
-        and config.global_profiler.get("steps") is not None
-        and len(config.global_profiler.get("steps", [])) > 0
-    ):
-        from verl.utils.import_utils import is_nvtx_available
-
-        assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = OmegaConf.to_container(
-            config.global_profiler.global_tool_config.nsys.controller_nsight_options
-        )
-        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
+    observation = None
+    runner_runtime_env = {}
+    try:
+        from rl_insight.integrations.verl import open_driver_session, write_trainer_context
+    except ImportError:
+        logger.debug("Optional rl-insight observation package is unavailable")
     else:
-        runner = task_runner_class.remote()
-    ray.get(runner.run.remote(config))
+        observation = open_driver_session(config)
+        if observation.enabled:
+            backends = [trainer_logger] if isinstance(trainer_logger, str) else list(trainer_logger or [])
+            if "rl_insight" not in backends:
+                backends.append("rl_insight")
+            OmegaConf.update(config, "trainer.logger", backends, force_add=True)
+        write_trainer_context(config, observation)
 
-    # [Optional] get the path of the timeline trace file from the configuration, default to None
-    # This file is used for performance analysis
-    timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
-    if timeline_json_file:
-        ray.timeline(filename=timeline_json_file)
+    try:
+        # Check if Ray is not initialized
+        if not ray.is_initialized():
+            # Initialize Ray with a local cluster configuration
+            # Set environment variables in the runtime environment to control tokenizer parallelism,
+            # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
+            # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
+            default_runtime_env = get_ppo_ray_runtime_env(config)
+            ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
+            runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
+
+            if config.transfer_queue.enable:
+                # Add runtime environment variables for transfer queue
+                runtime_env_vars = runtime_env_kwargs.get("env_vars", {})
+                runtime_env_vars["TRANSFER_QUEUE_ENABLE"] = "1"
+                runtime_env_kwargs["env_vars"] = runtime_env_vars
+
+            runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+            ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
+            print(f"ray init kwargs: {ray_init_kwargs}")
+            init_options = OmegaConf.to_container(ray_init_kwargs)
+            if observation is not None and observation.enabled:
+                from rl_insight.integrations.tq_worker import worker_runtime_env
+
+                init_options["runtime_env"] = worker_runtime_env(
+                    init_options["runtime_env"], observation.session.context
+                )
+            ray.init(**init_options)
+        elif observation is not None and observation.enabled:
+            # An externally initialized hook may already be serialized by Ray.
+            # Preserve it rather than guessing how to call it a second time.
+            inherited = ray.get_runtime_context().runtime_env
+            if inherited.get("worker_process_setup_hook"):
+                logger.warning("TQ observation hook not installed: external Ray already has a worker hook")
+            else:
+                from rl_insight.integrations.tq_worker import worker_runtime_env
+
+                runner_runtime_env = worker_runtime_env({}, observation.session.context)
+
+        # Create a remote instance of the TaskRunner class, and
+        # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
+        if (
+            is_cuda_available
+            and config.global_profiler.tool == "nsys"
+            and config.global_profiler.get("steps") is not None
+            and len(config.global_profiler.get("steps", [])) > 0
+        ):
+            from verl.utils.import_utils import is_nvtx_available
+
+            assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
+            nsight_options = OmegaConf.to_container(
+                config.global_profiler.global_tool_config.nsys.controller_nsight_options
+            )
+            runner = task_runner_class.options(runtime_env={**runner_runtime_env, "nsight": nsight_options}).remote()
+        else:
+            runner = task_runner_class.options(runtime_env=runner_runtime_env).remote()
+        ray.get(runner.run.remote(config))
+
+        # [Optional] get the path of the timeline trace file from the configuration, default to None
+        # This file is used for performance analysis
+        timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
+        if timeline_json_file:
+            ray.timeline(filename=timeline_json_file)
+    finally:
+        if observation is not None:
+            observation.close()
 
 
 @ray.remote
@@ -134,6 +170,9 @@ class TaskRunnerV1:
     def run(self, config: DictConfig):
         """Run the PPO training process."""
         configure_verl_logging()
+        from verl.utils.tracking import RLInsightLogger
+
+        RLInsightLogger.bind_config(config)
 
         import transfer_queue as tq
 
@@ -156,12 +195,19 @@ class TaskRunnerV1:
             self.trainer.fit(self.agent_loop_manager)
             succeeded = True
         finally:
+            if RLInsightLogger._protocol_selected:
+                from rl_insight.integrations.verl import close_worker_sessions
+
+                close_worker_sessions(self.trainer)
             try:
                 tracking = getattr(self.trainer, "logger", None)
                 if tracking is not None:
                     tracking.finish(exit_code=0 if succeeded else 1)
             finally:
-                tq.close()
+                try:
+                    tq.close()
+                finally:
+                    RLInsightLogger.finish()
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)

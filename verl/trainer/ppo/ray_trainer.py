@@ -822,6 +822,7 @@ class RayPPOTrainer:
             )
 
             critic_cfg = TrainingWorkerConfig(
+                rl_insight_context=self.config.trainer.get("rl_insight_context"),
                 model_type="value_model",
                 model_config=orig_critic_cfg.model,
                 engine_config=engine_config,

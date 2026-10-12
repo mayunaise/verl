@@ -152,6 +152,7 @@ class SGLangHttpServer:
         self._disaggregation_bootstrap_port = disaggregation_bootstrap_port
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
+        RLInsightLogger.bind_config(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
@@ -455,7 +456,25 @@ class SGLangHttpServer:
 
             add_prometheus_middleware(app)
 
+        if self.config.get("rl_insight_context") is not None:
+            from rl_insight.integrations.verl import prepare_exporter, publish_metrics_endpoint
+
+            session, incarnation = await prepare_exporter(app, self.config)
+        else:
+            session, incarnation = None, None
         self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
+        if session and incarnation:
+            import asyncio
+
+            host = self._server_address
+            address = f"http://[{host}]:{self._server_port}" if ":" in host else f"http://{host}:{self._server_port}"
+            await asyncio.to_thread(
+                publish_metrics_endpoint, session, address, component="sglang",
+                instance_key=f"replica_{self.replica_rank}_node_{self.node_rank}", incarnation=incarnation,
+                alive=lambda task=self._server_task: not task.done(),
+            )
+            self._server_task.add_done_callback(lambda task: session.close())
+
         self.tokenizer_manager.server_status = ServerStatus.Up
 
     async def wake_up(self):
@@ -522,6 +541,9 @@ class SGLangHttpServer:
         obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.resume_memory_occupation(obj, None)
         await self.tokenizer_manager.flush_cache()
+
+    async def close_observation(self):
+        RLInsightLogger.finish()
 
     async def generate(
         self,

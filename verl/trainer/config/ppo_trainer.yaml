@@ -133,6 +133,13 @@ algorithm:
 # config for the trainer
 trainer:
 
+  # Optional driver observation settings; frozen context is filled by the main driver.
+  rl_insight:
+    server_url: null
+    otlp_endpoint: null
+    proxy_port: null
+  rl_insight_context: null
+
   # Whether to balance batch sizes across distributed workers
   balance_batch: True
 

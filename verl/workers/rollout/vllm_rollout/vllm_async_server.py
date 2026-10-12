@@ -133,6 +133,7 @@ class vLLMHttpServer:
         os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
 
         self.config = self._init_config(config)
+        RLInsightLogger.bind_config(config)
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 
@@ -483,7 +484,25 @@ class vLLMHttpServer:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
         self.engine = engine_client
+        if self.config.get("rl_insight_context") is not None:
+            from rl_insight.integrations.verl import prepare_exporter, publish_metrics_endpoint
+
+            session, incarnation = await prepare_exporter(app, self.config)
+        else:
+            session, incarnation = None, None
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
+        if session and incarnation:
+            import asyncio
+
+            host = self._server_address
+            address = f"http://[{host}]:{self._server_port}" if ":" in host else f"http://{host}:{self._server_port}"
+            await asyncio.to_thread(
+                publish_metrics_endpoint, session, address, component="vllm",
+                instance_key=f"replica_{self.replica_rank}_node_{self.node_rank}", incarnation=incarnation,
+                alive=lambda task=self._server_task: not task.done(),
+            )
+            self._server_task.add_done_callback(lambda task: session.close())
+
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
@@ -507,6 +526,9 @@ class vLLMHttpServer:
 
         self.task = asyncio.create_task(asyncio.to_thread(run_headless_wrapper))
         self.task.add_done_callback(on_run_headless_done)
+
+    async def close_observation(self):
+        RLInsightLogger.finish()
 
     async def generate(
         self,

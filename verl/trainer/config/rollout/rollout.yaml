@@ -1,6 +1,9 @@
 # Target class for this configuration
 _target_: verl.workers.config.RolloutConfig
 
+# Frozen observation context propagated by the driver; workers never resolve identity.
+rl_insight_context: null
+
 # actor_rollout_ref.rollout.name: hf/vllm/sglang/trtllm. The default value will be removed in the future
 name: ???
 

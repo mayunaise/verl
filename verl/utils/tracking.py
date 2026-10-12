@@ -225,6 +225,8 @@ class RLInsightLogger:
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
     _init_done = False
+    _protocol_selected = False
+    _session = None
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
 
@@ -242,11 +244,33 @@ class RLInsightLogger:
     @classmethod
     def enabled(cls) -> bool:
         """Return whether rl-insight is globally enabled in this process."""
+        if cls._protocol_selected:
+            return bool(cls._session and cls._session.enabled)
         return os.getenv(cls.ENABLE_ENV) == "1"
 
     @classmethod
+    def bind_config(cls, config, *, trainer_metrics=False):
+        trainer = config.get("trainer", {}) if hasattr(config, "get") else {}
+        value = trainer.get("rl_insight_context")
+        if value is None:
+            value = config.get("rl_insight_context") if hasattr(config, "get") else getattr(config, "rl_insight_context", None)
+        if value is None:
+            return
+        from rl_insight.integrations.verl import attach_from_config, serve_trainer_metrics
+
+        cls._protocol_selected = True
+        cls._session = attach_from_config(config)
+        cls._init_done = bool(cls._session and cls._session.enabled)
+        if trainer_metrics and cls._init_done:
+            serve_trainer_metrics(cls._session)
+
+    @classmethod
     def init(cls, project_name=None, experiment_name=None, config=None):
-        if not cls.enabled() or cls._init_done:
+        if config is not None:
+            trainer = config.get("trainer", {})
+            if trainer.get("rl_insight_context") is not None:
+                cls.bind_config(config, trainer_metrics=True)
+        if cls._protocol_selected or not cls.enabled() or cls._init_done:
             return
 
         rl_insight_config = {}
@@ -262,6 +286,11 @@ class RLInsightLogger:
 
     @classmethod
     def log(cls, data, step):
+        if cls._protocol_selected:
+            from rl_insight.integrations.verl import log_scalars
+
+            log_scalars(cls._session, data, step)
+            return
         if not cls.enabled():
             return
         if not cls._init_done:
@@ -278,6 +307,12 @@ class RLInsightLogger:
 
     @classmethod
     def finish(cls):
+        if cls._protocol_selected:
+            if cls._session:
+                cls._session.close()
+            cls._session = None
+            cls._init_done = False
+            return
         if not cls._init_done:
             return
 
@@ -294,6 +329,12 @@ class RLInsightLogger:
         state_lane_id: str | int | None = None,
         **labels: Any,
     ):
+        if cls._protocol_selected:
+            from rl_insight.integrations.verl import trace_state
+
+            with trace_state(cls._session, state_name, state_lane_id=state_lane_id, **labels):
+                yield
+            return
         if not cls.enabled():
             yield
             return
@@ -336,7 +377,8 @@ class RLInsightLogger:
         job_name: str | None = None,
         labels: list[dict[str, Any] | None] | None = None,
     ) -> None:
-        if not cls.enabled():
+        # Protocol exporters publish locally after bind with proof and real liveness.
+        if cls._protocol_selected or not cls.enabled():
             return
 
         metric_key = (job_name, tuple(server_addresses), repr(labels))

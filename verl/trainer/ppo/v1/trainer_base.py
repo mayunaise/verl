@@ -259,6 +259,7 @@ class PPOTrainer(ABC):
             )
 
             worker_cfg = TrainingWorkerConfig(
+                rl_insight_context=self.config.trainer.get("rl_insight_context"),
                 model_type="value_model",
                 model_config=critic_cfg.model,
                 engine_config=critic_cfg.engine,

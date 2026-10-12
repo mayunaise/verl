@@ -684,6 +684,7 @@ class MindSpeedEngineConfig(McoreEngineConfig):
 
 @dataclass
 class TrainingWorkerConfig(BaseConfig):
+    rl_insight_context: str | None = None
     model_type: str = None  # model type (language_model/value_model)
     model_config: HFModelConfig = None
     engine_config: EngineConfig = None

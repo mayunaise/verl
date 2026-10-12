@@ -143,6 +143,7 @@ class CheckpointEngineConfig(BaseConfig):
 
 @dataclass
 class RolloutConfig(BaseConfig):
+    rl_insight_context: str | None = None
     _mutable_fields = {
         "max_model_len",
         "load_format",

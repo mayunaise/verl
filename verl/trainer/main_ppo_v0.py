@@ -158,6 +158,9 @@ class TaskRunner(BaseTaskRunner):
             config: Training configuration object containing all parameters needed
                    for setting up and running the PPO training process.
         """
+        from verl.utils.tracking import RLInsightLogger
+
+        RLInsightLogger.bind_config(config)
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint
 
@@ -231,4 +234,11 @@ class TaskRunner(BaseTaskRunner):
         trainer.init_workers()
 
         # Start the training process.
-        trainer.fit()
+        try:
+            trainer.fit()
+        finally:
+            if RLInsightLogger._protocol_selected:
+                from rl_insight.integrations.verl import close_worker_sessions
+
+                close_worker_sessions(trainer)
+            RLInsightLogger.finish()
