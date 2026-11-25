@@ -123,7 +123,6 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
-        rl_insight_config: dict | None = None,
     ):
         """
         Args:
@@ -163,7 +162,7 @@ class vLLMHttpServer:
         os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
 
         self.config = self._init_config(config)
-        RLInsightLogger.init_worker(self.config.trace, rl_insight_config)
+        RLInsightLogger.init_worker(self.config.trace, self.config.rl_insight_config)
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 
@@ -1694,7 +1693,6 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
-                **self.rl_insight_kwargs,
             )
             self.servers.append(server)
 

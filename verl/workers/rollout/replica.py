@@ -119,7 +119,6 @@ class RolloutReplica(ABC):
         if self.config.prefix_cache_namespace is None:
             self.config.prefix_cache_namespace = _PREFIX_CACHE_NAMESPACE
         self.model_config: HFModelConfig = model_config
-        self.rl_insight_kwargs: dict[str, Any] = {}
 
         self.world_size = (
             self.config.tensor_model_parallel_size

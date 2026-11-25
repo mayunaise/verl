@@ -20,12 +20,13 @@ Utility classes for manage and request LLM servers:
 import asyncio
 import logging
 import os
+from copy import deepcopy
 from typing import Any, Optional
 from uuid import uuid4
 
 import numpy as np
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
@@ -477,19 +478,21 @@ class LLMServerManager:
         )
         num_replicas = world_size // rollout_world_size
 
+        rollout_config = self.rollout_config
+        rl_insight_config = RLInsightLogger.worker_init_kwargs(self.config).get("rl_insight_config")
+        if rl_insight_config is not None:
+            rollout_config = deepcopy(rollout_config)
+            OmegaConf.update(rollout_config, "rl_insight_config", rl_insight_config, force_add=True)
+
         self.rollout_replicas = [
             self.rollout_replica_class(
                 replica_rank=start_rank + replica_rank,
-                config=self.rollout_config,
+                config=rollout_config,
                 model_config=self.model_config,
                 gpus_per_node=self.rollout_config.n_gpus_per_node,
             )
             for replica_rank in range(num_replicas)
         ]
-
-        rl_insight_kwargs = RLInsightLogger.worker_init_kwargs(self.config)
-        for replica in self.rollout_replicas:
-            replica.rl_insight_kwargs = rl_insight_kwargs
 
         if self.worker_group and self.rollout_config.name != "trtllm":
             await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])

@@ -156,7 +156,6 @@ class SGLangHttpServer:
         base_gpu_id: int,
         disaggregation_role: str = "null",
         disaggregation_bootstrap_port: Optional[int] = None,
-        rl_insight_config: dict | None = None,
     ):
         print(
             f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, "
@@ -171,7 +170,7 @@ class SGLangHttpServer:
         self._disaggregation_bootstrap_port = disaggregation_bootstrap_port
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
-        RLInsightLogger.init_worker(self.config.trace, rl_insight_config)
+        RLInsightLogger.init_worker(self.config.trace, self.config.rl_insight_config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
@@ -904,7 +903,6 @@ class SGLangReplica(RolloutReplica):
                 nnodes=self.nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
                 base_gpu_id=base_gpu_id,
-                **self.rl_insight_kwargs,
             )
             self.servers.append(server)
 
