@@ -258,7 +258,7 @@ class RolloutReplica(ABC):
 
     async def _init_rl_insight_workers(self) -> None:
         if self.config.name in ("vllm", "sglang"):
-            await asyncio.gather(*RLInsightLogger.init_workers(self.servers))
+            await asyncio.gather(*RLInsightLogger.init_rl_insight_worker(self.servers))
 
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""

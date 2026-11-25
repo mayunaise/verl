@@ -333,7 +333,7 @@ class PPOTrainer(ABC):
                 ray_cls_with_init=worker_dict_cls,
                 **wg_kwargs,
             )
-            ray.get(RLInsightLogger.init_workers(wg_dict.workers))
+            ray.get(RLInsightLogger.init_rl_insight_worker(wg_dict.workers))
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
             logger.info(f"create worker group {spawn_wg.keys()}")

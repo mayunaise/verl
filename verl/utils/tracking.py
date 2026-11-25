@@ -286,7 +286,7 @@ class RLInsightLogger:
             cls.register_transfer_queue_metrics(config)
 
     @classmethod
-    def init_workers(cls, workers):
+    def init_rl_insight_worker(cls, workers):
         """Submit named Push initialization to the existing Ray actors."""
         if cls._init_args is None:
             return []
