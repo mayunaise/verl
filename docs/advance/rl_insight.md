@@ -25,7 +25,7 @@ pip install "git+https://github.com/verl-project/rl-insight.git"
 Or install a released package:
 
 ```bash
-pip install "rl-insight>=0.2.0"
+pip install "rl-insight>=0.4.0"
 ```
 
 ### Install monitor services

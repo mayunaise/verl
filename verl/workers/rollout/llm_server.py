@@ -487,6 +487,10 @@ class LLMServerManager:
             for replica_rank in range(num_replicas)
         ]
 
+        rl_insight_kwargs = RLInsightLogger.worker_init_kwargs(self.config)
+        for replica in self.rollout_replicas:
+            replica.rl_insight_kwargs = rl_insight_kwargs
+
         if self.worker_group and self.rollout_config.name != "trtllm":
             await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
         # TODO: unify trtllm to init_hybrid
@@ -515,10 +519,18 @@ class LLMServerManager:
                     self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name
                 )
             if RLInsightLogger.enabled():
+                trainer_config = self.config.trainer
                 RLInsightLogger.register_rollout_metrics(
                     self.server_addresses,
                     self.rollout_config.name,
-                    labels=[{"replica": server.replica_rank} for server in self.rollout_replicas],
+                    labels=[
+                        {
+                            "project": trainer_config.project_name,
+                            "experiment_name": trainer_config.experiment_name,
+                            "replica": server.replica_rank,
+                        }
+                        for server in self.rollout_replicas
+                    ],
                 )
 
     async def _init_global_load_balancer(self) -> None:

@@ -228,7 +228,7 @@ class RLInsightLogger:
     """Logger backend that exports scalar metrics and rl-insight runtime signals."""
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
-    MINIMUM_RL_INSIGHT_VERSION = Version("0.3.0")
+    MINIMUM_RL_INSIGHT_VERSION = Version("0.4.0")
     _init_done = False
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
@@ -284,6 +284,41 @@ class RLInsightLogger:
             cls.register_transfer_queue_metrics(config)
 
     @classmethod
+    def worker_init_kwargs(cls, config):
+        """Pass explicit Push settings to workers through their actor arguments."""
+        if not cls.enabled():
+            return {}
+        overrides = config.get("trainer", {}).get("rl_insight")
+        if not overrides:
+            return {}
+
+        from omegaconf import OmegaConf
+        from rl_insight.utils import MonitorBackend, load_monitor_config
+
+        monitor_config = load_monitor_config(overrides)
+        if str(monitor_config.server.backend).strip() != MonitorBackend.PUSH:
+            return {}
+        push_config = OmegaConf.to_container(monitor_config.push, resolve=True) if monitor_config.get("push") else {}
+        push_config.pop("rollout", None)
+        return {"rl_insight_config": {"server": {"backend": MonitorBackend.PUSH}, "push": push_config}}
+
+    @classmethod
+    def init_worker(cls, trace_config, config=None):
+        """Initialize Push before the worker reports its first state."""
+        if trace_config is None or not cls.enabled() or cls._init_done:
+            return
+
+        from rl_insight.utils import MonitorBackend, load_monitor_config
+
+        monitor_config = load_monitor_config(config)
+        if str(monitor_config.server.backend).strip() == MonitorBackend.PUSH:
+            cls.init(
+                project_name=trace_config.project_name,
+                experiment_name=trace_config.experiment_name,
+                config={"trainer": {"rl_insight": config}} if config is not None else None,
+            )
+
+    @classmethod
     def log(cls, data, step):
         if not cls.enabled():
             return
@@ -326,7 +361,6 @@ class RLInsightLogger:
             yield
             return
 
-        cls._ensure_rl_insight_init()
         with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
             yield
 

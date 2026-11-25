@@ -91,7 +91,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
-from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
+from verl.utils.tracking import DapoFilteredRewardTableLogger, RLInsightLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -265,11 +265,13 @@ class PPOTrainer(ABC):
         else:
             actor_role = Role.ActorRollout
         actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
+        rl_insight_kwargs = RLInsightLogger.worker_init_kwargs(self.config)
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
             config=self.config.actor_rollout_ref,
             distillation_config=self.config.get("distillation"),
             role=str(actor_role),
+            **rl_insight_kwargs,
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
 
@@ -279,6 +281,7 @@ class PPOTrainer(ABC):
                 cls=self.role_worker_mapping[Role.RefPolicy],
                 config=self.config.actor_rollout_ref,
                 role=str(Role.RefPolicy),
+                **rl_insight_kwargs,
             )
             self.resource_pool_to_cls[ref_resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
@@ -304,7 +307,12 @@ class PPOTrainer(ABC):
                 profiler_config=critic_profiler_config,
             )
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
-            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=worker_cfg)
+            critic_kwargs = dict(rl_insight_kwargs)
+            if RLInsightLogger.enabled():
+                critic_kwargs["rl_insight_trace"] = self.config.actor_rollout_ref.rollout.trace
+            critic_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.Critic], config=worker_cfg, **critic_kwargs
+            )
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
         # 3. create worker group for actor rollout and critic

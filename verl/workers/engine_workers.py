@@ -24,7 +24,7 @@ from typing import Optional
 import psutil
 import torch
 from codetiming import Timer
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig, OmegaConf, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
@@ -116,8 +116,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
     and do not provide exact APIs as Tinker does. But this can be added in the future.
     """
 
-    def __init__(self, config: TrainingWorkerConfig):
+    def __init__(self, config: TrainingWorkerConfig, *, rl_insight_trace=None, rl_insight_config=None):
         Worker.__init__(self)
+        RLInsightLogger.init_worker(rl_insight_trace, rl_insight_config)
 
         from verl.workers.engine import BaseEngine, EngineRegistry
 
@@ -496,10 +497,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     ref_worker_cls = TrainingWorker
 
     def __init__(
-        self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
+        self,
+        config: DictConfig,
+        role: str,
+        distillation_config: Optional[DistillationConfig] = None,
+        rl_insight_config=None,
+        **kwargs,
     ):
         Worker.__init__(self)
         self.config = config
+        RLInsightLogger.init_worker(OmegaConf.select(config, "rollout.trace"), rl_insight_config)
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
