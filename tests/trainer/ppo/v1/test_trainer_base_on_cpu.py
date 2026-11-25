@@ -14,7 +14,7 @@
 
 import math
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from omegaconf import OmegaConf
@@ -35,6 +35,30 @@ class _StubTrainer(PPOTrainer):
 
     def on_sample_end(self):
         pass
+
+
+def test_finish_worker_monitoring_waits_for_training_and_rollout_workers(monkeypatch):
+    monkeypatch.setenv("VERL_RL_INSIGHT_ENABLE", "1")
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    worker, server = MagicMock(), MagicMock()
+    worker.__ray_call__ = SimpleNamespace(remote=MagicMock(return_value="training"))
+    server.__ray_call__ = SimpleNamespace(remote=MagicMock(return_value="rollout"))
+    trainer.actor_rollout_wg = SimpleNamespace(workers=[worker])
+    trainer.ref_policy_wg = SimpleNamespace(workers=[worker])
+    trainer.llm_server_manager = SimpleNamespace(rollout_replicas=[SimpleNamespace(servers=[server])])
+    ray_shutdown = MagicMock()
+
+    with (
+        patch("verl.trainer.ppo.v1.trainer_base.ray.wait", ray_shutdown.wait),
+        patch("verl.trainer.ppo.v1.trainer_base.ray.get", ray_shutdown.get),
+    ):
+        trainer.finish_worker_monitoring()
+
+    worker.__ray_call__.remote.assert_called_once()
+    server.__ray_call__.remote.assert_called_once()
+    refs = ray_shutdown.wait.call_args.args[0]
+    assert set(refs) == {"training", "rollout"}
+    assert ray_shutdown.mock_calls == [call.wait(refs, num_returns=2), call.get(refs)]
 
 
 class _CustomSampler:

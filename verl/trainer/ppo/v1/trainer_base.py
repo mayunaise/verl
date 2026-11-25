@@ -91,7 +91,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
-from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
+from verl.utils.tracking import DapoFilteredRewardTableLogger, RLInsightLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -817,6 +817,37 @@ class PPOTrainer(ABC):
             self.train_dataloader = self.val_dataloader = None
             self.train_dataloader_it = None
             close_dataloaders(train, val)
+
+    def finish_worker_monitoring(self) -> None:
+        """Finish process-local monitoring before TaskRunner releases the actors."""
+        if not RLInsightLogger.enabled():
+            return
+
+        actors = set()
+        for name in ("actor_rollout_wg", "ref_policy_wg", "critic_wg"):
+            group = getattr(self, name, None)
+            if group is not None:
+                actors.update(group.workers)
+
+        managers = self._rollout_server_managers()
+        reward_loop = getattr(self, "reward_loop_manager", None)
+        if reward_loop is not None and reward_loop.reward_model_manager is not None:
+            managers.append(reward_loop.reward_model_manager)
+        teacher = getattr(self, "teacher_model_manager", None)
+        if teacher is not None:
+            managers.extend(teacher.teacher_model_managers.values())
+        for manager in managers:
+            for replica in manager.rollout_replicas:
+                actors.update(replica.servers)
+
+        if actors:
+            try:
+                refs = [actor.__ray_call__.remote(lambda _: RLInsightLogger.finish()) for actor in actors]
+                # Wait for the other workers even if one actor has already exited.
+                ray.wait(refs, num_returns=len(refs))
+                ray.get(refs)
+            except ray.exceptions.RayError:
+                logger.exception("Failed to finish RL-Insight in worker processes")
 
     def _init_builtin_dataloaders(self):
         """Preserve the existing custom-dataset and StatefulDataLoader path."""
