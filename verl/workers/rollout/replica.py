@@ -27,6 +27,7 @@ from verl.plugin.platform import get_platform
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
@@ -154,7 +155,7 @@ class RolloutReplica(ABC):
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
         ]
-        await self.launch_servers()
+        await self._start_servers()
 
     async def init_hybrid_colocated(self, worker_group: RayWorkerGroup, resource_pool: RayResourcePool):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
@@ -170,7 +171,7 @@ class RolloutReplica(ABC):
         ]
         self.resource_pool = resource_pool
         self.bundle_indices = [self.replica_rank * self.world_size + idx for idx in range(self.world_size)]
-        await self.launch_servers()
+        await self._start_servers()
 
     # TODO(sgm): this should be the default solution, but need to make the RolloutMode more clear.
     async def init_colocated(self, resource_pool: RayResourcePool):
@@ -200,7 +201,7 @@ class RolloutReplica(ABC):
             device_name=get_device_name(),
         )
         self.workers = worker_group.workers
-        await self.launch_servers()
+        await self._start_servers()
 
     async def init_standalone(self, resource_pool: Optional[RayResourcePool] = None):
         """Init standalone rollout server.
@@ -249,7 +250,12 @@ class RolloutReplica(ABC):
             device_name=get_device_name(),
         )
         self.workers = worker_group.workers
+        await self._start_servers()
+
+    async def _start_servers(self):
         await self.launch_servers()
+        if self.config.name in ("vllm", "sglang"):
+            await asyncio.gather(*RLInsightLogger.init_workers(self.servers))
 
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""

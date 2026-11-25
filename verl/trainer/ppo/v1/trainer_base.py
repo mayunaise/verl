@@ -265,13 +265,11 @@ class PPOTrainer(ABC):
         else:
             actor_role = Role.ActorRollout
         actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
-        rl_insight_kwargs = RLInsightLogger.worker_init_kwargs(self.config)
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
             config=self.config.actor_rollout_ref,
             distillation_config=self.config.get("distillation"),
             role=str(actor_role),
-            **rl_insight_kwargs,
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
 
@@ -281,7 +279,6 @@ class PPOTrainer(ABC):
                 cls=self.role_worker_mapping[Role.RefPolicy],
                 config=self.config.actor_rollout_ref,
                 role=str(Role.RefPolicy),
-                **rl_insight_kwargs,
             )
             self.resource_pool_to_cls[ref_resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
@@ -307,12 +304,7 @@ class PPOTrainer(ABC):
                 profiler_config=critic_profiler_config,
             )
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
-            critic_kwargs = dict(rl_insight_kwargs)
-            if RLInsightLogger.enabled():
-                critic_kwargs["rl_insight_trace"] = self.config.actor_rollout_ref.rollout.trace
-            critic_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.Critic], config=worker_cfg, **critic_kwargs
-            )
+            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=worker_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
         # 3. create worker group for actor rollout and critic
@@ -341,6 +333,7 @@ class PPOTrainer(ABC):
                 ray_cls_with_init=worker_dict_cls,
                 **wg_kwargs,
             )
+            ray.get(RLInsightLogger.init_workers(wg_dict.workers))
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
             logger.info(f"create worker group {spawn_wg.keys()}")

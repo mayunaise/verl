@@ -294,7 +294,6 @@ class RolloutConfig(BaseConfig):
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
 
     trace: TraceConfig = field(default_factory=TraceConfig)
-    rl_insight_config: dict[str, Any] | None = None
 
     multi_turn: MultiTurnConfig = field(default_factory=MultiTurnConfig)
 

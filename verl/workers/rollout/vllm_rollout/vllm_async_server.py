@@ -162,7 +162,6 @@ class vLLMHttpServer:
         os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
 
         self.config = self._init_config(config)
-        RLInsightLogger.init_worker(self.config.trace, self.config.rl_insight_config)
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 

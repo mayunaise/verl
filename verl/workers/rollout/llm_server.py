@@ -20,13 +20,12 @@ Utility classes for manage and request LLM servers:
 import asyncio
 import logging
 import os
-from copy import deepcopy
 from typing import Any, Optional
 from uuid import uuid4
 
 import numpy as np
 import ray
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
@@ -478,16 +477,10 @@ class LLMServerManager:
         )
         num_replicas = world_size // rollout_world_size
 
-        rollout_config = self.rollout_config
-        rl_insight_config = RLInsightLogger.worker_init_kwargs(self.config).get("rl_insight_config")
-        if rl_insight_config is not None:
-            rollout_config = deepcopy(rollout_config)
-            OmegaConf.update(rollout_config, "rl_insight_config", rl_insight_config, force_add=True)
-
         self.rollout_replicas = [
             self.rollout_replica_class(
                 replica_rank=start_rank + replica_rank,
-                config=rollout_config,
+                config=self.rollout_config,
                 model_config=self.model_config,
                 gpus_per_node=self.rollout_config.n_gpus_per_node,
             )

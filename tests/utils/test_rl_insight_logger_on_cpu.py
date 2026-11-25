@@ -26,11 +26,13 @@ from verl.utils.tracking import RLInsightLogger
 @pytest.fixture(autouse=True)
 def _reset_rl_insight_logger():
     RLInsightLogger._init_done = False
+    RLInsightLogger._init_args = None
     RLInsightLogger._rl_insight_module = None
     RLInsightLogger._registered_metrics.clear()
     RLInsightLogger._warned_unsupported_features.clear()
     yield
     RLInsightLogger._init_done = False
+    RLInsightLogger._init_args = None
     RLInsightLogger._rl_insight_module = None
     RLInsightLogger._registered_metrics.clear()
     RLInsightLogger._warned_unsupported_features.clear()

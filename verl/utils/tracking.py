@@ -230,6 +230,7 @@ class RLInsightLogger:
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
     MINIMUM_RL_INSIGHT_VERSION = Version("0.4.0")
     _init_done = False
+    _init_args: tuple[str | None, str | None, Any] | None = None
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
     _warned_unsupported_features: set[str] = set()
@@ -280,43 +281,37 @@ class RLInsightLogger:
                 pass
         cls._get_rl_insight().init(project=project_name, experiment_name=experiment_name, config=rl_insight_config)
         cls._init_done = True
+        cls._init_args = (project_name, experiment_name, rl_insight_config)
         if config is not None:
             cls.register_transfer_queue_metrics(config)
 
     @classmethod
-    def worker_init_kwargs(cls, config):
-        """Pass explicit Push settings to workers through their actor arguments."""
-        if not cls.enabled():
-            return {}
-        overrides = config.get("trainer", {}).get("rl_insight")
-        if not overrides:
-            return {}
+    def init_workers(cls, workers):
+        """Submit named Push initialization to the existing Ray actors."""
+        if cls._init_args is None:
+            return []
 
         from omegaconf import OmegaConf
         from rl_insight.utils import MonitorBackend, load_monitor_config
 
+        project_name, experiment_name, overrides = cls._init_args
         monitor_config = load_monitor_config(overrides)
         if str(monitor_config.server.backend).strip() != MonitorBackend.PUSH:
-            return {}
-        push_config = OmegaConf.to_container(monitor_config.push, resolve=True) if monitor_config.get("push") else {}
-        push_config.pop("rollout", None)
-        return {"rl_insight_config": {"server": {"backend": MonitorBackend.PUSH}, "push": push_config}}
+            return []
 
-    @classmethod
-    def init_worker(cls, trace_config, config=None):
-        """Initialize Push before the worker reports its first state."""
-        if trace_config is None or not cls.enabled() or cls._init_done:
-            return
+        push_config = (
+            OmegaConf.to_container(monitor_config.push, resolve=True)
+            if overrides and monitor_config.get("push")
+            else {}
+        )
+        # Only the TaskRunner registers scrape targets.
+        push_config["rollout"] = None
+        config = {"trainer": {"rl_insight": {"server": {"backend": MonitorBackend.PUSH}, "push": push_config}}}
 
-        from rl_insight.utils import MonitorBackend, load_monitor_config
+        def init_worker(_):
+            cls.init(project_name=project_name, experiment_name=experiment_name, config=config)
 
-        monitor_config = load_monitor_config(config)
-        if str(monitor_config.server.backend).strip() == MonitorBackend.PUSH:
-            cls.init(
-                project_name=trace_config.project_name,
-                experiment_name=trace_config.experiment_name,
-                config={"trainer": {"rl_insight": config}} if config is not None else None,
-            )
+        return [worker.__ray_call__.remote(init_worker) for worker in workers]
 
     @classmethod
     def log(cls, data, step):
@@ -346,6 +341,7 @@ class RLInsightLogger:
 
         cls._get_rl_insight().finish()
         cls._init_done = False
+        cls._init_args = None
         cls._registered_metrics.clear()
 
     @classmethod

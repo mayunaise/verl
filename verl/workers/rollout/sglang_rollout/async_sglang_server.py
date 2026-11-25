@@ -170,7 +170,6 @@ class SGLangHttpServer:
         self._disaggregation_bootstrap_port = disaggregation_bootstrap_port
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
-        RLInsightLogger.init_worker(self.config.trace, self.config.rl_insight_config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
