@@ -179,10 +179,7 @@ class TaskRunnerV1:
         finally:
             try:
                 if self.trainer is not None:
-                    try:
-                        self.trainer.close_dataloaders()
-                    finally:
-                        self.trainer.finish_worker_monitoring()
+                    self.trainer.close_dataloaders()
             finally:
                 try:
                     tracking = getattr(self.trainer, "logger", None)
