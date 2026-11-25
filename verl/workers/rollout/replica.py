@@ -155,7 +155,8 @@ class RolloutReplica(ABC):
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
         ]
-        await self._start_servers()
+        await self.launch_servers()
+        await self._init_rl_insight_workers()
 
     async def init_hybrid_colocated(self, worker_group: RayWorkerGroup, resource_pool: RayResourcePool):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
@@ -171,7 +172,8 @@ class RolloutReplica(ABC):
         ]
         self.resource_pool = resource_pool
         self.bundle_indices = [self.replica_rank * self.world_size + idx for idx in range(self.world_size)]
-        await self._start_servers()
+        await self.launch_servers()
+        await self._init_rl_insight_workers()
 
     # TODO(sgm): this should be the default solution, but need to make the RolloutMode more clear.
     async def init_colocated(self, resource_pool: RayResourcePool):
@@ -201,7 +203,8 @@ class RolloutReplica(ABC):
             device_name=get_device_name(),
         )
         self.workers = worker_group.workers
-        await self._start_servers()
+        await self.launch_servers()
+        await self._init_rl_insight_workers()
 
     async def init_standalone(self, resource_pool: Optional[RayResourcePool] = None):
         """Init standalone rollout server.
@@ -250,10 +253,10 @@ class RolloutReplica(ABC):
             device_name=get_device_name(),
         )
         self.workers = worker_group.workers
-        await self._start_servers()
-
-    async def _start_servers(self):
         await self.launch_servers()
+        await self._init_rl_insight_workers()
+
+    async def _init_rl_insight_workers(self) -> None:
         if self.config.name in ("vllm", "sglang"):
             await asyncio.gather(*RLInsightLogger.init_workers(self.servers))
 
