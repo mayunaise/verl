@@ -108,6 +108,7 @@ class TeacherModelManager:
                 for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
             ]
         )
+        _run_all([server.init_rl_insight_workers() for server in self.rollout_replicas])
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 

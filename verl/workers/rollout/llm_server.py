@@ -529,6 +529,8 @@ class LLMServerManager:
                     ],
                 )
 
+        await asyncio.gather(*[server.init_rl_insight_workers() for server in self.rollout_replicas])
+
     async def _init_global_load_balancer(self) -> None:
         from verl.workers.rollout.router import get_router_handle
 

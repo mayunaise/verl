@@ -91,6 +91,7 @@ class RewardModelManager:
             )
         else:
             self._run_all([server.init_standalone() for server in self.rollout_replicas])
+        self._run_all([server.init_rl_insight_workers() for server in self.rollout_replicas])
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
